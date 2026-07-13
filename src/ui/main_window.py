@@ -17,7 +17,7 @@ from PyQt6.QtGui import QFont
 from src.ui.chart_widget import ChartWidget
 from src.utils.config import (
     REGION_NAMES, UI_CONFIG, DISCLAIMER, COMMUNITY_TYPE_NAMES,
-    DATA_TYPE_NAMES, DATA_TYPE_UNIT
+    DATA_TYPES, DATA_TYPE_NAMES, DATA_TYPE_UNIT
 )
 from src.utils.aggregator import get_chart_data, get_region_summary
 from src.data.database import get_last_update_time
