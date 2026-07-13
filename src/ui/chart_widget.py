@@ -17,10 +17,14 @@ logger = get_logger("chart")
 
 
 def _build_echart_html(title: str, dates: List[str],
-                       ohlcs: List[list], volumes: List[int]) -> str:
+                       ohlcs: List[list], volumes: List[int],
+                       unit: str = "元/㎡") -> str:
     """
     生成完整的 ECharts HTML 页面。
     纯字符串拼接，不使用 .format() 避免与 JS 花括号冲突。
+
+    参数:
+        unit: 价格单位，如 '元/㎡' 或 '元/月'
     """
     dates_json = json.dumps(dates, ensure_ascii=False)
     ohlcs_json = json.dumps(ohlcs)
@@ -68,10 +72,10 @@ var option = {
           var isUp = d[2] >= d[1];
           var clr = isUp ? '#FF4444' : '#00CC66';
           res += '<span style="color:' + clr + '">● K线</span><br/>';
-          res += '&nbsp;&nbsp;开盘: ' + d[1].toLocaleString() + ' 元/㎡<br/>';
-          res += '&nbsp;&nbsp;收盘: ' + d[2].toLocaleString() + ' 元/㎡<br/>';
-          res += '&nbsp;&nbsp;最低: ' + d[3].toLocaleString() + ' 元/㎡<br/>';
-          res += '&nbsp;&nbsp;最高: ' + d[4].toLocaleString() + ' 元/㎡<br/>';
+          res += '&nbsp;&nbsp;开盘: ' + d[1].toLocaleString() + ' """ + unit + """<br/>';
+          res += '&nbsp;&nbsp;收盘: ' + d[2].toLocaleString() + ' """ + unit + """<br/>';
+          res += '&nbsp;&nbsp;最低: ' + d[3].toLocaleString() + ' """ + unit + """<br/>';
+          res += '&nbsp;&nbsp;最高: ' + d[4].toLocaleString() + ' """ + unit + """<br/>';
         } else if (p.seriesType === 'bar') {
           res += '<span style="color:#888">● 成交量: ' + p.data + ' 套</span><br/>';
         }
@@ -109,7 +113,7 @@ var option = {
   yAxis: [
     {
       type: 'value',
-      name: '元/㎡',
+      name: '""" + unit + """',
       nameTextStyle: { color: '#aaa' },
       gridIndex: 0,
       axisLine: { lineStyle: { color: '#555' } },
@@ -222,7 +226,7 @@ class ChartWidget(QWidget):
 
     def _init_chart(self):
         """初始化空白K线图"""
-        html = _build_echart_html("加载中...", [], [], [])
+        html = _build_echart_html("加载中...", [], [], [], unit="元/㎡")
         self.web_view.setHtml(html)
         self.web_view.loadFinished.connect(self._on_load_finished)
 
@@ -244,7 +248,7 @@ class ChartWidget(QWidget):
             self.progress_bar.hide()
 
     def update_chart(self, dates: List[str], ohlcs: List[list],
-                     volumes: List[int], title: str):
+                     volumes: List[int], title: str, unit: str = "元/㎡"):
         """
         更新K线图数据。
 
@@ -253,19 +257,20 @@ class ChartWidget(QWidget):
             ohlcs: K线数据 [open, close, low, high]
             volumes: 成交量列表
             title: 图表标题
+            unit: 价格单位（元/㎡ 或 元/月）
         """
         if not dates or not ohlcs:
             logger.warning("没有数据可用于更新图表")
             # 显示"暂无数据"提示
-            html = _build_echart_html(title + " — 暂无数据", [], [], [])
+            html = _build_echart_html(title + " — 暂无数据", [], [], [], unit=unit)
             self.web_view.setHtml(html)
             return
 
         if not self._chart_ready:
             # 等待加载完成后再显示
-            self._pending_data = (dates, ohlcs, volumes, title)
+            self._pending_data = (dates, ohlcs, volumes, title, unit)
             # 直接重新加载HTML（此时可能页面还没加载完，但setHtml会覆盖）
-            html = _build_echart_html(title, dates, ohlcs, volumes)
+            html = _build_echart_html(title, dates, ohlcs, volumes, unit=unit)
             self.web_view.setHtml(html)
             return
 

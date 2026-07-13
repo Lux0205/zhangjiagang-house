@@ -16,7 +16,8 @@ from PyQt6.QtGui import QFont
 
 from src.ui.chart_widget import ChartWidget
 from src.utils.config import (
-    REGION_NAMES, UI_CONFIG, DISCLAIMER, COMMUNITY_TYPE_NAMES
+    REGION_NAMES, UI_CONFIG, DISCLAIMER, COMMUNITY_TYPE_NAMES,
+    DATA_TYPE_NAMES, DATA_TYPE_UNIT
 )
 from src.utils.aggregator import get_chart_data, get_region_summary
 from src.data.database import get_last_update_time
@@ -33,17 +34,22 @@ class UpdateWorker(QThread):
     finished = pyqtSignal(bool, str)
     _stop_flag = False
 
+    def __init__(self, data_type="buy"):
+        super().__init__()
+        self.data_type = data_type
+
     def stop(self):
         self._stop_flag = True
 
     def run(self):
+        type_label = "租房" if self.data_type == "rent" else "买房"
         try:
             self.progress.emit("正在连接数据源...", 5)
             if self._stop_flag:
                 return
             manager = ScraperManager()
-            self.progress.emit("开始抓取数据(可能需要1-3分钟)...", 10)
-            results = manager.run_all()
+            self.progress.emit(f"开始抓取{type_label}数据(可能需要1-3分钟)...", 10)
+            results = manager.run_all(data_type=self.data_type)
             all_records = manager.get_all_records()
             self.progress.emit(f"已抓取 {len(all_records)} 条原始数据...", 60)
 
@@ -52,7 +58,7 @@ class UpdateWorker(QThread):
 
             self.progress.emit("正在计算聚合数据...", 80)
             from src.utils.aggregator import aggregate_all_regions_types
-            aggregate_all_regions_types()
+            aggregate_all_regions_types(data_type=self.data_type)
             self.progress.emit("更新完成！", 100)
 
             summary = manager.get_summary()
@@ -75,6 +81,7 @@ class MainWindow(QMainWindow):
 
         self.current_region = "一环"
         self.current_community_type = "高层"
+        self.current_data_type = "buy"  # 'buy'=买房, 'rent'=租房
         self.worker: Optional[UpdateWorker] = None
 
         self._setup_ui()
@@ -91,6 +98,9 @@ class MainWindow(QMainWindow):
 
         # ===== 顶部工具栏 =====
         main_layout.addWidget(self._create_top_bar())
+
+        # ===== 数据类型切换：买房/租房 =====
+        main_layout.addWidget(self._create_data_type_selector())
 
         # ===== 区域切换按钮 =====
         main_layout.addWidget(self._create_region_buttons())
@@ -152,6 +162,31 @@ class MainWindow(QMainWindow):
         self.refresh_btn.clicked.connect(self._on_manual_refresh)
         layout.addWidget(self.refresh_btn)
 
+        return bar
+
+    def _create_data_type_selector(self) -> QWidget:
+        """数据类型切换：买房价格 / 租房价格"""
+        bar = QWidget()
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(8, 2, 8, 2)
+        layout.setSpacing(4)
+
+        label = QLabel("查看：")
+        label.setStyleSheet("color: #aaa; font-size: 12px;")
+        layout.addWidget(label)
+
+        self.data_type_buttons: Dict[str, QPushButton] = {}
+        for dt in DATA_TYPE_NAMES:
+            label_text = DATA_TYPE_UNIT.get(dt, "")
+            btn = QPushButton(f"{'买房价格' if dt == 'buy' else '租房价格'} ({label_text})")
+            btn.setCheckable(True)
+            btn.setFixedSize(140, 28)
+            btn.clicked.connect(lambda checked, d=dt: self._on_data_type_clicked(d))
+            self.data_type_buttons[dt] = btn
+            layout.addWidget(btn)
+
+        layout.addStretch()
+        self.data_type_buttons["buy"].setChecked(True)
         return bar
 
     def _create_region_buttons(self) -> QWidget:
@@ -224,7 +259,7 @@ class MainWindow(QMainWindow):
         top_info.addWidget(self.region_info_label)
         top_info.addStretch()
 
-        self.price_info_label = QLabel("均价: -- 元/㎡")
+        self.price_info_label = QLabel(f"均价: -- {DATA_TYPE_UNIT['buy']}")
         self.price_info_label.setStyleSheet("font-size: 14px; color: #4CAF50; font-weight: bold;")
         top_info.addWidget(self.price_info_label)
         top_info.addStretch()
@@ -283,6 +318,14 @@ class MainWindow(QMainWindow):
 
     # ===== 事件处理 =====
 
+    def _on_data_type_clicked(self, data_type: str):
+        """切换买房/租房"""
+        self.current_data_type = data_type
+        for dt, btn in self.data_type_buttons.items():
+            btn.setChecked(dt == data_type)
+        self._load_chart_data(self.current_region, self.current_community_type)
+        self._load_region_summary(self.current_region)
+
     def _on_region_clicked(self, region_name: str):
         self.current_region = region_name
         for name, btn in self.region_buttons.items():
@@ -300,7 +343,7 @@ class MainWindow(QMainWindow):
         self._start_update(is_manual=True)
 
     def _auto_update_on_startup(self):
-        last_update = get_last_update_time()
+        last_update = get_last_update_time(data_type=self.current_data_type)
         today = datetime.now().strftime("%Y-%m-%d")
 
         # 先加载并显示已有数据，不阻塞界面显示
@@ -332,7 +375,7 @@ class MainWindow(QMainWindow):
         self.update_progress.setValue(0)
         self.status_bar.showMessage("正在更新数据...")
 
-        self.worker = UpdateWorker()
+        self.worker = UpdateWorker(data_type=self.current_data_type)
         self.worker.progress.connect(self._on_update_progress)
         self.worker.finished.connect(lambda ok, msg: self._on_update_finished(ok, msg, is_manual))
         self.worker.start()
@@ -347,7 +390,7 @@ class MainWindow(QMainWindow):
         self.update_progress.setVisible(False)
         self.status_bar.showMessage("就绪")
 
-        last_update = get_last_update_time()
+        last_update = get_last_update_time(data_type=self.current_data_type)
         self.update_time_label.setText(f"最后更新: {last_update}")
 
         if is_manual:
@@ -362,12 +405,16 @@ class MainWindow(QMainWindow):
     def _load_chart_data(self, region_name: str, community_type: str):
         """加载并显示某区域某类型的K线图"""
         try:
-            data = get_chart_data(region_name, community_type, days=30)
+            data = get_chart_data(region_name, community_type, days=30,
+                                  data_type=self.current_data_type)
+
+            unit = DATA_TYPE_UNIT.get(self.current_data_type, "元/㎡")
+            type_label = "租房" if self.current_data_type == "rent" else "买房"
 
             if data["dates"]:
-                title = f"{region_name} - {community_type} 房价K线图 (近30天)"
+                title = f"{region_name} - {community_type} {type_label}K线图 (近30天)"
                 self.chart_widget.update_chart(
-                    data["dates"], data["ohlcs"], data["volumes"], title
+                    data["dates"], data["ohlcs"], data["volumes"], title, unit=unit
                 )
 
                 latest = data["latest"]
@@ -378,7 +425,7 @@ class MainWindow(QMainWindow):
                 self.region_info_label.setText(
                     f"区域: {region_name} | 类型: {community_type} | 房源: {volume}套"
                 )
-                self.price_info_label.setText(f"均价: {close_price:,.0f} 元/㎡")
+                self.price_info_label.setText(f"均价: {close_price:,.0f} {unit}")
 
                 if change_pct > 0:
                     self.change_info_label.setText(f"30日涨跌: +{change_pct:.2f}%")
@@ -390,14 +437,14 @@ class MainWindow(QMainWindow):
                     self.change_info_label.setText("30日涨跌: 持平")
                     self.change_info_label.setStyleSheet("font-size: 13px; color: #888;")
 
-                logger.info(f"已加载 {region_name}/{community_type} K线图: {len(data['dates'])} 天")
+                logger.info(f"已加载 {region_name}/{community_type} {type_label}K线图: {len(data['dates'])} 天")
             else:
                 title = f"{region_name} - {community_type} - 暂无数据"
                 self.chart_widget.update_chart([], [], [], title)
                 self.region_info_label.setText(f"区域: {region_name} | 类型: {community_type}")
-                self.price_info_label.setText("均价: 暂无数据")
+                self.price_info_label.setText(f"均价: 暂无数据")
                 self.change_info_label.setText("涨跌: --")
-                logger.info(f"{region_name}/{community_type} 暂无数据")
+                logger.info(f"{region_name}/{community_type} 暂无{type_label}数据")
 
         except Exception as e:
             logger.error(f"加载图表失败: {e}")
@@ -406,20 +453,21 @@ class MainWindow(QMainWindow):
     def _load_region_summary(self, region_name: str):
         """加载某区域各类型汇总对比"""
         try:
-            summary = get_region_summary(region_name, days=30)
+            summary = get_region_summary(region_name, days=30, data_type=self.current_data_type)
 
             if summary:
                 parts = []
+                unit = DATA_TYPE_UNIT.get(self.current_data_type, "元/㎡")
                 for item in summary:
                     t = item["type"]
                     p = item["avg_price"]
                     c = item["change_pct"]
                     if c > 0:
-                        parts.append(f"🔴 {t}: {p:,.0f}元/㎡ (+{c:.1f}%)")
+                        parts.append(f"🔴 {t}: {p:,.0f}{unit} (+{c:.1f}%)")
                     elif c < 0:
-                        parts.append(f"🟢 {t}: {p:,.0f}元/㎡ ({c:.1f}%)")
+                        parts.append(f"🟢 {t}: {p:,.0f}{unit} ({c:.1f}%)")
                     else:
-                        parts.append(f"⚪ {t}: {p:,.0f}元/㎡ (持平)")
+                        parts.append(f"⚪ {t}: {p:,.0f}{unit} (持平)")
 
                 self.summary_label.setText(" | ".join(parts))
             else:

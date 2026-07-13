@@ -1,13 +1,13 @@
 """
 张家港房价App - 假数据填充模块
-按小区类型（别墅/洋房/高层/老小区/拆迁房）分别生成对应的房价数据
+支持两种数据类型：
+  - 买房价格（元/㎡）
+  - 租房价格（元/月）
+按小区类型（别墅/洋房/高层/老小区/拆迁房）分别生成对应数据
 
-各类型价格区间基于张家港2026年市场水平：
-- 别墅：20000-40000元/㎡（一环最贵，向外递减）
-- 洋房：15000-25000元/㎡
-- 高层：8000-18000元/㎡
-- 老小区：6000-12000元/㎡
-- 拆迁房：4000-9000元/㎡
+各类型价格基于张家港2026年市场水平：
+【买房】别墅32000 洋房20000 高层14000 老小区9500 拆迁房6500（元/㎡）
+【租房】别墅2500 洋房1800 高层1200 老小区800 拆迁房500（元/月）
 """
 
 import random
@@ -16,7 +16,8 @@ from typing import Dict, List
 
 from src.data.database import insert_raw_prices_batch, insert_ohlc
 from src.utils.config import (
-    REGION_NAMES, COMMUNITY_TYPE_NAMES, COMMUNITY_TYPES
+    REGION_NAMES, COMMUNITY_TYPE_NAMES, COMMUNITY_TYPES,
+    BUY_BASE_PRICES, RENT_BASE_PRICES, DATA_TYPE_UNIT
 )
 from src.utils.logger import get_logger
 
@@ -25,19 +26,19 @@ logger = get_logger("dummy_data")
 SOURCES = ["安居客", "房天下", "张家港房产网", "贝壳找房", "链家网", "58同城"]
 
 
-def _get_base_price(region_name: str, community_type: str) -> float:
+def _get_base_price(region_name: str, community_type: str, data_type: str = "buy") -> float:
     """
-    根据区域和类型获取基准价格。
+    根据区域、类型和数据类型获取基准价格。
     一环最贵，每向外一环价格递减约10-15%。
+
+    参数:
+        data_type: 'buy'=买房(元/㎡), 'rent'=租房(元/月)
     """
-    # 类型基准价（一环水平）
-    type_base = {
-        "别墅": 32000,
-        "洋房": 20000,
-        "高层": 14000,
-        "老小区": 9500,
-        "拆迁房": 6500,
-    }
+    # 根据数据类型选择基准价表
+    if data_type == "rent":
+        type_base = RENT_BASE_PRICES
+    else:
+        type_base = BUY_BASE_PRICES
 
     # 区域递减系数（一环=1.0，五环=0.6）
     region_factor = {
@@ -97,25 +98,31 @@ def _get_communities(region_name: str, community_type: str) -> List[str]:
     return region_comm.get(community_type, [f"{region_name}{community_type}小区"])
 
 
-def generate_dummy_data(days: int = 30) -> int:
+def generate_dummy_data(days: int = 30, data_type: str = "buy") -> int:
     """
     生成过去N天的假数据，按小区类型分类。
 
+    参数:
+        days: 生成多少天的数据
+        data_type: 'buy'=买房(元/㎡), 'rent'=租房(元/月)
+
     每套记录生成规则：
-    - 价格 = 基准价 × 趋势因子 × 小区类型因子 + 随机波动
+    - 价格 = 基准价 × 趋势因子 + 随机波动
     - 每个区域每类型每天从小区列表中随机选3-8个出价
     - 约65%的数据源当天有数据
     """
-    logger.info(f"开始生成假数据 ({days}天，按小区类型分类)...")
+    type_label = "租房" if data_type == "rent" else "买房"
+    logger.info(f"开始生成假数据 ({days}天, {type_label}, data_type={data_type})...")
 
     total_count = 0
+    unit = DATA_TYPE_UNIT.get(data_type, "元/㎡")
 
     for day_offset in range(days, 0, -1):
         date = (datetime.now() - timedelta(days=day_offset)).strftime("%Y-%m-%d")
 
         for region_name in REGION_NAMES:
             for ctype in COMMUNITY_TYPE_NAMES:
-                base = _get_base_price(region_name, ctype)
+                base = _get_base_price(region_name, ctype, data_type)
                 communities = _get_communities(region_name, ctype)
 
                 # 趋势因子（越晚越贵，模拟通胀）
@@ -135,15 +142,17 @@ def generate_dummy_data(days: int = 30) -> int:
                             # 随机波动（±15%以内）
                             noise = random.uniform(-0.08, 0.08)
                             price = base * trend * (1 + noise) + source_offset
-                            price = max(3000, price)
+                            # 租房最低100元/月，买房最低3000元/㎡
+                            price = max(100 if data_type == "rent" else 3000, price)
 
                             records.append({
                                 "date": date,
                                 "region": region_name,
                                 "community": community,
                                 "community_type": ctype,
+                                "data_type": data_type,
                                 "price": round(price, 2),
-                                "unit": "元/㎡",
+                                "unit": unit,
                                 "source": source,
                             })
 
@@ -151,41 +160,66 @@ def generate_dummy_data(days: int = 30) -> int:
                     insert_raw_prices_batch(records)
                     total_count += len(records)
 
-    logger.info(f"假数据生成完成: 共 {total_count} 条")
+    logger.info(f"假数据生成完成 ({type_label}): 共 {total_count} 条")
     return total_count
 
 
-def fill_ohlc_from_dummy():
-    """从假数据生成OHLC聚合数据"""
-    logger.info("开始按区域+类型聚合OHLC数据...")
+def fill_ohlc_from_dummy(data_type: str = "buy"):
+    """
+    从假数据生成OHLC聚合数据。
+
+    参数:
+        data_type: 'buy'=买房, 'rent'=租房
+    """
+    type_label = "租房" if data_type == "rent" else "买房"
+    logger.info(f"开始按区域+类型聚合OHLC数据 ({type_label})...")
 
     for day_offset in range(30, 0, -1):
         date = (datetime.now() - timedelta(days=day_offset)).strftime("%Y-%m-%d")
         for region in REGION_NAMES:
             for ctype in COMMUNITY_TYPE_NAMES:
                 from src.utils.aggregator import aggregate_daily_prices
-                aggregate_daily_prices(date, region, ctype)
+                aggregate_daily_prices(date, region, ctype, data_type=data_type)
 
-    logger.info("OHLC 聚合数据生成完成")
+    logger.info(f"OHLC 聚合数据生成完成 ({type_label})")
 
 
 def ensure_data_available():
-    """确保数据库中有数据，不足则填充假数据"""
+    """
+    确保数据库中有数据，不足则填充假数据。
+    同时填充买房和租房两类数据。
+    """
     from src.data.database import get_connection
 
     conn = get_connection()
-    cur = conn.execute("SELECT COUNT(*) as cnt FROM raw_prices")
-    total = cur.fetchone()[0]
+
+    # 检查买房数据
+    cur = conn.execute("SELECT COUNT(*) as cnt FROM raw_prices WHERE data_type='buy'")
+    buy_total = cur.fetchone()[0]
+
+    # 检查租房数据
+    cur = conn.execute("SELECT COUNT(*) as cnt FROM raw_prices WHERE data_type='rent'")
+    rent_total = cur.fetchone()[0]
+
     conn.close()
 
-    if total >= 200:
-        logger.info(f"数据库已有 {total} 条数据，无需填充")
-        return 0
+    total_added = 0
 
-    logger.warning(f"数据库数据不足（{total}条），填充假数据...")
+    # 填充买房假数据
+    if buy_total < 200:
+        logger.warning(f"买房数据不足（{buy_total}条），填充假数据...")
+        total_added += generate_dummy_data(30, data_type="buy")
+        fill_ohlc_from_dummy(data_type="buy")
+    else:
+        logger.info(f"买房数据已有 {buy_total} 条，无需填充")
 
-    total = generate_dummy_data(30)
-    fill_ohlc_from_dummy()
+    # 填充租房假数据
+    if rent_total < 200:
+        logger.warning(f"租房数据不足（{rent_total}条），填充假数据...")
+        total_added += generate_dummy_data(30, data_type="rent")
+        fill_ohlc_from_dummy(data_type="rent")
+    else:
+        logger.info(f"租房数据已有 {rent_total} 条，无需填充")
 
-    logger.info(f"已填充 {total} 条假数据 + OHLC聚合数据")
-    return total
+    logger.info(f"数据填充完成，共新增 {total_added} 条")
+    return total_added

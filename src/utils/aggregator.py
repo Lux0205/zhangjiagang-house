@@ -17,7 +17,8 @@ from src.utils.logger import get_logger
 logger = get_logger("aggregator")
 
 
-def aggregate_daily_prices(date: str, region: str, community_type: str) -> Optional[Dict]:
+def aggregate_daily_prices(date: str, region: str, community_type: str,
+                           data_type: str = "buy") -> Optional[Dict]:
     """
     对某一区域某一天某类型的多源价格数据进行聚合。
 
@@ -25,11 +26,12 @@ def aggregate_daily_prices(date: str, region: str, community_type: str) -> Optio
         date: 日期 (YYYY-MM-DD)
         region: 区域名称
         community_type: 小区类型（别墅/洋房/高层/老小区/拆迁房）
+        data_type: 'buy'=买房, 'rent'=租房
 
     返回:
         聚合后的OHLC数据，数据不足返回 None
     """
-    records = get_raw_prices(date, region, community_type)
+    records = get_raw_prices(date, region, community_type, data_type=data_type)
 
     if not records:
         return None
@@ -80,19 +82,24 @@ def aggregate_daily_prices(date: str, region: str, community_type: str) -> Optio
         "sources": source_list,
     }
 
-    insert_ohlc(**ohlc_record)
+    insert_ohlc(**ohlc_record, data_type=data_type)
     return ohlc_record
 
 
-def aggregate_all_regions_types(date: str = None) -> Dict:
-    """对所有区域和类型进行聚合"""
+def aggregate_all_regions_types(date: str = None, data_type: str = "buy") -> Dict:
+    """
+    对所有区域和类型进行聚合。
+
+    参数:
+        data_type: 'buy'=买房, 'rent'=租房
+    """
     if date is None:
         date = datetime.now().strftime("%Y-%m-%d")
 
     results = {}
     for region in REGION_NAMES:
         for ctype in COMMUNITY_TYPE_NAMES:
-            result = aggregate_daily_prices(date, region, ctype)
+            result = aggregate_daily_prices(date, region, ctype, data_type=data_type)
             if result:
                 key = f"{region}_{ctype}"
                 results[key] = result
@@ -121,15 +128,19 @@ def aggregate_date_range(start_date: str = None, end_date: str = None) -> Dict:
     return all_results
 
 
-def get_chart_data(region: str, community_type: str, days: int = 30) -> Dict:
+def get_chart_data(region: str, community_type: str, days: int = 30,
+                   data_type: str = "buy") -> Dict:
     """
     获取某区域某类型的K线图数据（ECharts格式）。
     默认查询最近30天。
 
+    参数:
+        data_type: 'buy'=买房, 'rent'=租房
+
     返回:
         ECharts K线图所需的数据字典
     """
-    records = get_ohlc_by_region_type(region, community_type, days)
+    records = get_ohlc_by_region_type(region, community_type, days, data_type=data_type)
 
     if not records:
         return {
@@ -175,9 +186,12 @@ def get_chart_data(region: str, community_type: str, days: int = 30) -> Dict:
     }
 
 
-def get_region_summary(region: str, days: int = 30) -> List[Dict]:
+def get_region_summary(region: str, days: int = 30, data_type: str = "buy") -> List[Dict]:
     """
     获取某区域所有小区类型的汇总统计（用于底部信息展示）。
+
+    参数:
+        data_type: 'buy'=买房, 'rent'=租房
 
     返回:
         各类型汇总列表，例如:
@@ -189,7 +203,7 @@ def get_region_summary(region: str, days: int = 30) -> List[Dict]:
     """
     summary = []
     for ctype in COMMUNITY_TYPE_NAMES:
-        data = get_chart_data(region, ctype, days)
+        data = get_chart_data(region, ctype, days, data_type=data_type)
         if data["latest"]:
             summary.append({
                 "type": ctype,

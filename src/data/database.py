@@ -29,13 +29,15 @@ def init_database():
     """
     初始化数据库表结构。
     两张表：
-    1. raw_prices  — 原始抓取的每套房屋价格（增加 community_type 字段）
-    2. ohlc_data   — 聚合后的OHLC K线数据（按 区域+类型+日期 聚合）
+    1. raw_prices  — 原始抓取的每套房屋价格（含 community_type、data_type 字段）
+    2. ohlc_data   — 聚合后的OHLC K线数据（按 区域+类型+日期+data_type 聚合）
+
+    data_type: 'buy'=买房(元/㎡), 'rent'=租房(元/月)
     """
     conn = get_connection()
     c = conn.cursor()
 
-    # 第一步：创建新表（包含 community_type 列）
+    # 第一步：创建新表（包含 community_type、data_type 列）
     c.execute("""
         CREATE TABLE IF NOT EXISTS raw_prices (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,11 +45,12 @@ def init_database():
             region          TEXT    NOT NULL,
             community       TEXT,
             community_type  TEXT    DEFAULT '高层',
+            data_type       TEXT    DEFAULT 'buy',
             price           REAL    NOT NULL,
             unit            TEXT    DEFAULT '元/㎡',
             source          TEXT    NOT NULL,
             fetch_time      TEXT    NOT NULL,
-            UNIQUE(date, region, community, source)
+            UNIQUE(date, region, community, source, data_type)
         )
     """)
 
@@ -57,6 +60,7 @@ def init_database():
             date            TEXT    NOT NULL,
             region          TEXT    NOT NULL,
             community_type  TEXT    DEFAULT '高层',
+            data_type       TEXT    DEFAULT 'buy',
             open_price      REAL,
             high_price      REAL,
             low_price       REAL,
@@ -65,28 +69,36 @@ def init_database():
             volume          INTEGER DEFAULT 0,
             sources         TEXT,
             updated_at      TEXT    NOT NULL,
-            UNIQUE(date, region, community_type)
+            UNIQUE(date, region, community_type, data_type)
         )
     """)
 
-    # 第二步：检查是否需要升级旧表（已有表但没有 community_type 列）
+    # 第二步：检查是否需要升级旧表（已有表但没有 community_type/data_type 列）
     c.execute("PRAGMA table_info(raw_prices)")
     raw_cols = [row[1] for row in c.fetchall()]
     if "community_type" not in raw_cols:
         c.execute("ALTER TABLE raw_prices ADD COLUMN community_type TEXT DEFAULT '高层'")
         logger.info("raw_prices 表升级: 增加 community_type 列")
+    if "data_type" not in raw_cols:
+        c.execute("ALTER TABLE raw_prices ADD COLUMN data_type TEXT DEFAULT 'buy'")
+        logger.info("raw_prices 表升级: 增加 data_type 列")
 
     c.execute("PRAGMA table_info(ohlc_data)")
     ohlc_cols = [row[1] for row in c.fetchall()]
     if "community_type" not in ohlc_cols:
         c.execute("ALTER TABLE ohlc_data ADD COLUMN community_type TEXT DEFAULT '高层'")
         logger.info("ohlc_data 表升级: 增加 community_type 列")
+    if "data_type" not in ohlc_cols:
+        c.execute("ALTER TABLE ohlc_data ADD COLUMN data_type TEXT DEFAULT 'buy'")
+        logger.info("ohlc_data 表升级: 增加 data_type 列")
 
     # 索引
     c.execute("CREATE INDEX IF NOT EXISTS idx_rp_dr ON raw_prices(date, region)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_rp_drt ON raw_prices(date, region, community_type)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_rp_drtd ON raw_prices(date, region, community_type, data_type)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_od_dr ON ohlc_data(date, region)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_od_drt ON ohlc_data(date, region, community_type)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_od_drtd ON ohlc_data(date, region, community_type, data_type)")
 
     conn.commit()
     logger.info("数据库初始化完成")
@@ -96,15 +108,20 @@ def init_database():
 # ===== 原始价格操作 =====
 
 def insert_raw_price(date, region, community, price, source,
-                     unit="元/㎡", community_type="高层"):
-    """插入一条原始价格"""
+                     unit="元/㎡", community_type="高层", data_type="buy"):
+    """
+    插入一条原始价格。
+
+    参数:
+        data_type: 'buy'=买房, 'rent'=租房
+    """
     conn = get_connection()
     try:
         conn.execute("""
             INSERT OR IGNORE INTO raw_prices
-            (date, region, community, community_type, price, unit, source, fetch_time)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (date, region, community, community_type, price, unit, source,
+            (date, region, community, community_type, data_type, price, unit, source, fetch_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (date, region, community, community_type, data_type, price, unit, source,
               datetime.now().isoformat()))
         conn.commit()
         return True
@@ -116,7 +133,13 @@ def insert_raw_price(date, region, community, price, source,
 
 
 def insert_raw_prices_batch(records):
-    """批量插入原始价格数据"""
+    """
+    批量插入原始价格数据。
+
+    参数:
+        records: 字典列表，每个字典需包含 date, region, price, source，
+                 可选 community, community_type, data_type, unit
+    """
     conn = get_connection()
     count = 0
     try:
@@ -125,11 +148,12 @@ def insert_raw_prices_batch(records):
             try:
                 conn.execute("""
                     INSERT OR IGNORE INTO raw_prices
-                    (date, region, community, community_type, price, unit, source, fetch_time)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (date, region, community, community_type, data_type, price, unit, source, fetch_time)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     r["date"], r["region"], r.get("community", ""),
                     r.get("community_type", "高层"),
+                    r.get("data_type", "buy"),
                     r["price"], r.get("unit", "元/㎡"), r["source"], now
                 ))
                 count += 1
@@ -144,21 +168,26 @@ def insert_raw_prices_batch(records):
     return count
 
 
-def get_raw_prices(date, region, community_type=None):
-    """查询原始价格数据"""
+def get_raw_prices(date, region, community_type=None, data_type="buy"):
+    """
+    查询原始价格数据。
+
+    参数:
+        data_type: 'buy'=买房, 'rent'=租房
+    """
     conn = get_connection()
     try:
         if community_type:
             cur = conn.execute("""
                 SELECT * FROM raw_prices
-                WHERE date=? AND region=? AND community_type=?
+                WHERE date=? AND region=? AND community_type=? AND data_type=?
                 ORDER BY price
-            """, (date, region, community_type))
+            """, (date, region, community_type, data_type))
         else:
             cur = conn.execute("""
-                SELECT * FROM raw_prices WHERE date=? AND region=?
+                SELECT * FROM raw_prices WHERE date=? AND region=? AND data_type=?
                 ORDER BY price
-            """, (date, region))
+            """, (date, region, data_type))
         return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
@@ -186,16 +215,21 @@ def get_raw_prices_stats(date, region):
 
 def insert_ohlc(date, region, community_type,
                 open_price, high_price, low_price, close_price,
-                avg_price, volume, sources=""):
-    """插入/更新OHLC数据"""
+                avg_price, volume, sources="", data_type="buy"):
+    """
+    插入/更新OHLC数据。
+
+    参数:
+        data_type: 'buy'=买房, 'rent'=租房
+    """
     conn = get_connection()
     try:
         conn.execute("""
             INSERT OR REPLACE INTO ohlc_data
-            (date, region, community_type, open_price, high_price, low_price,
+            (date, region, community_type, data_type, open_price, high_price, low_price,
              close_price, avg_price, volume, sources, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (date, region, community_type, open_price, high_price, low_price,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (date, region, community_type, data_type, open_price, high_price, low_price,
               close_price, avg_price, volume, sources, datetime.now().isoformat()))
         conn.commit()
         return True
@@ -206,45 +240,60 @@ def insert_ohlc(date, region, community_type,
         conn.close()
 
 
-def get_ohlc_by_region_type(region, community_type, days=365):
-    """查询某区域某类型最近N天的OHLC数据"""
+def get_ohlc_by_region_type(region, community_type, days=365, data_type="buy"):
+    """
+    查询某区域某类型最近N天的OHLC数据。
+
+    参数:
+        data_type: 'buy'=买房, 'rent'=租房
+    """
     conn = get_connection()
     try:
         cur = conn.execute("""
             SELECT date, open_price, high_price, low_price, close_price,
                    avg_price, volume, sources
             FROM ohlc_data
-            WHERE region=? AND community_type=?
+            WHERE region=? AND community_type=? AND data_type=?
               AND date >= date('now', ?)
             ORDER BY date ASC
-        """, (region, community_type, f"-{days} days"))
+        """, (region, community_type, data_type, f"-{days} days"))
         return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
 
 
-def get_latest_ohlc(region, community_type):
-    """查询某区域某类型最新的OHLC数据"""
+def get_latest_ohlc(region, community_type, data_type="buy"):
+    """
+    查询某区域某类型最新的OHLC数据。
+
+    参数:
+        data_type: 'buy'=买房, 'rent'=租房
+    """
     conn = get_connection()
     try:
         cur = conn.execute("""
             SELECT date, open_price, high_price, low_price, close_price,
                    avg_price, volume, sources
             FROM ohlc_data
-            WHERE region=? AND community_type=?
+            WHERE region=? AND community_type=? AND data_type=?
             ORDER BY date DESC LIMIT 1
-        """, (region, community_type))
+        """, (region, community_type, data_type))
         row = cur.fetchone()
         return dict(row) if row else None
     finally:
         conn.close()
 
 
-def get_last_update_time():
-    """获取最后更新日期"""
+def get_last_update_time(data_type="buy"):
+    """
+    获取某种数据类型最后更新日期。
+
+    参数:
+        data_type: 'buy'=买房, 'rent'=租房
+    """
     conn = get_connection()
     try:
-        cur = conn.execute("SELECT MAX(date) as last_date FROM ohlc_data")
+        cur = conn.execute("SELECT MAX(date) as last_date FROM ohlc_data WHERE data_type=?", (data_type,))
         row = cur.fetchone()
         return row["last_date"] if row else None
     finally:

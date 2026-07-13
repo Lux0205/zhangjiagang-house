@@ -55,9 +55,12 @@ class ScraperManager:
             else:
                 logger.warning(f"未知爬虫类型: {key}")
 
-    def run_all(self) -> Dict[str, List[Dict]]:
+    def run_all(self, data_type: str = "buy") -> Dict[str, List[Dict]]:
         """
         运行所有爬虫，收集数据。
+
+        参数:
+            data_type: 'buy'=买房, 'rent'=租房
 
         返回:
             所有爬虫的结果字典 {数据源名: 数据列表}
@@ -65,7 +68,8 @@ class ScraperManager:
         self.results = {}
         self.errors = {}
 
-        logger.info(f"开始全量抓取，共 {len(self.scrapers)} 个数据源...")
+        type_label = "租房" if data_type == "rent" else "买房"
+        logger.info(f"开始全量抓取 ({type_label})，共 {len(self.scrapers)} 个数据源...")
 
         total_start = datetime.now()
 
@@ -74,8 +78,12 @@ class ScraperManager:
                 logger.info(f"开始抓取: {scraper.source_name}")
                 records = scraper.scrape()
 
-                # 过滤有效记录
-                valid_records = [r for r in records if scraper.validate_record(r)]
+                # 过滤有效记录，并打上 data_type 标签
+                valid_records = []
+                for r in records:
+                    if scraper.validate_record(r):
+                        r["data_type"] = data_type
+                        valid_records.append(r)
                 self.results[key] = valid_records
 
                 logger.info(f"[完成] {scraper.source_name}: {len(valid_records)}/{len(records)} 条有效")
@@ -86,7 +94,7 @@ class ScraperManager:
 
         elapsed = (datetime.now() - total_start).total_seconds()
         total_count = sum(len(v) for v in self.results.values())
-        logger.info(f"全量抓取完成: {total_count} 条数据，耗时 {elapsed:.1f} 秒，{len(self.errors)} 个源失败")
+        logger.info(f"全量抓取完成 ({type_label}): {total_count} 条数据，耗时 {elapsed:.1f} 秒，{len(self.errors)} 个源失败")
 
         return self.results
 
