@@ -107,8 +107,14 @@ def aggregate_all_regions_types(date: str = None, data_type: str = "buy") -> Dic
     return results
 
 
-def aggregate_date_range(start_date: str = None, end_date: str = None) -> Dict:
-    """对一段时间内逐日聚合"""
+def aggregate_date_range(start_date: str = None, end_date: str = None,
+                         data_type: str = "buy") -> Dict:
+    """
+    对一段时间内逐日聚合。
+
+    参数:
+        data_type: 'buy'=买房, 'rent'=租房
+    """
     if end_date is None:
         end_date = datetime.now().strftime("%Y-%m-%d")
     if start_date is None:
@@ -121,7 +127,7 @@ def aggregate_date_range(start_date: str = None, end_date: str = None) -> Dict:
     current = start
     while current <= end:
         date_str = current.strftime("%Y-%m-%d")
-        results = aggregate_all_regions_types(date_str)
+        results = aggregate_all_regions_types(date_str, data_type=data_type)
         all_results[date_str] = results
         current += timedelta(days=1)
 

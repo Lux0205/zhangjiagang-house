@@ -33,6 +33,9 @@ def init_database():
     2. ohlc_data   — 聚合后的OHLC K线数据（按 区域+类型+日期+data_type 聚合）
 
     data_type: 'buy'=买房(元/㎡), 'rent'=租房(元/月)
+
+    注意：SQLite 的 ALTER TABLE ADD COLUMN 无法修改 UNIQUE 约束，
+    因此旧表迁移时需要通过"新建表→复制数据→删除旧表→重命名"来刷新约束。
     """
     conn = get_connection()
     c = conn.cursor()
@@ -73,36 +76,139 @@ def init_database():
         )
     """)
 
-    # 第二步：检查是否需要升级旧表（已有表但没有 community_type/data_type 列）
-    c.execute("PRAGMA table_info(raw_prices)")
-    raw_cols = [row[1] for row in c.fetchall()]
-    if "community_type" not in raw_cols:
-        c.execute("ALTER TABLE raw_prices ADD COLUMN community_type TEXT DEFAULT '高层'")
-        logger.info("raw_prices 表升级: 增加 community_type 列")
-    if "data_type" not in raw_cols:
-        c.execute("ALTER TABLE raw_prices ADD COLUMN data_type TEXT DEFAULT 'buy'")
-        logger.info("raw_prices 表升级: 增加 data_type 列")
-
-    c.execute("PRAGMA table_info(ohlc_data)")
-    ohlc_cols = [row[1] for row in c.fetchall()]
-    if "community_type" not in ohlc_cols:
-        c.execute("ALTER TABLE ohlc_data ADD COLUMN community_type TEXT DEFAULT '高层'")
-        logger.info("ohlc_data 表升级: 增加 community_type 列")
-    if "data_type" not in ohlc_cols:
-        c.execute("ALTER TABLE ohlc_data ADD COLUMN data_type TEXT DEFAULT 'buy'")
-        logger.info("ohlc_data 表升级: 增加 data_type 列")
+    # 第二步：检查并升级旧表
+    # SQLite 的 ALTER TABLE ADD COLUMN 无法修改 UNIQUE 约束，
+    # 所以需要检测旧约束并重建表以刷新约束定义。
+    _migrate_table(c, "raw_prices",
+                   "(date, region, community, source, data_type)",
+                   ["community_type", "data_type"])
+    _migrate_table(c, "ohlc_data",
+                   "(date, region, community_type, data_type)",
+                   ["community_type", "data_type"])
 
     # 索引
-    c.execute("CREATE INDEX IF NOT EXISTS idx_rp_dr ON raw_prices(date, region)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_rp_drt ON raw_prices(date, region, community_type)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_rp_drtd ON raw_prices(date, region, community_type, data_type)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_od_dr ON ohlc_data(date, region)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_od_drt ON ohlc_data(date, region, community_type)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_od_drtd ON ohlc_data(date, region, community_type, data_type)")
 
     conn.commit()
     logger.info("数据库初始化完成")
     conn.close()
+
+
+def _migrate_table(cursor, table_name, expected_unique_cols, expected_columns):
+    """
+    迁移单张表：通过"重命名旧表→新建正确表→复制数据→删除旧表"的方式
+    修复 SQLite 的 ALTER TABLE ADD COLUMN 无法更新 UNIQUE 约束的问题。
+
+    参数:
+        cursor: 数据库游标
+        table_name: 表名
+        expected_unique_cols: 期望的 UNIQUE 约束列（仅用于日志）
+        expected_columns: 必须存在的列名列表（用于判断是否需要迁移）
+    """
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    existing_cols = [row[1] for row in cursor.fetchall()]
+
+    # 检查是否缺少新列（说明是旧版数据库）
+    missing_cols = [col for col in expected_columns if col not in existing_cols]
+    if not missing_cols:
+        logger.info(f"{table_name} 结构已是最新，无需迁移")
+        return
+
+    logger.info(f"{table_name} 旧版数据库缺少列 {missing_cols}，执行完整迁移...")
+
+    # 读取旧数据
+    cursor.execute(f"SELECT * FROM {table_name}")
+    old_rows = cursor.fetchall()
+    col_names = [desc[0] for desc in cursor.description] if cursor.description else []
+
+    # 重命名旧表（保留数据）
+    cursor.execute(f"ALTER TABLE {table_name} RENAME TO _migrate_old_{table_name}")
+
+    # 创建新表（使用正确的含 data_type 的 UNIQUE 约束）
+    if table_name == "raw_prices":
+        cursor.execute("""
+            CREATE TABLE raw_prices (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                date            TEXT    NOT NULL,
+                region          TEXT    NOT NULL,
+                community       TEXT,
+                community_type  TEXT    DEFAULT '高层',
+                data_type       TEXT    DEFAULT 'buy',
+                price           REAL    NOT NULL,
+                unit            TEXT    DEFAULT '元/㎡',
+                source          TEXT    NOT NULL,
+                fetch_time      TEXT    NOT NULL,
+                UNIQUE(date, region, community, source, data_type)
+            )
+        """)
+    elif table_name == "ohlc_data":
+        cursor.execute("""
+            CREATE TABLE ohlc_data (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                date            TEXT    NOT NULL,
+                region          TEXT    NOT NULL,
+                community_type  TEXT    DEFAULT '高层',
+                data_type       TEXT    DEFAULT 'buy',
+                open_price      REAL,
+                high_price      REAL,
+                low_price       REAL,
+                close_price     REAL,
+                avg_price       REAL,
+                volume          INTEGER DEFAULT 0,
+                sources         TEXT,
+                updated_at      TEXT    NOT NULL,
+                UNIQUE(date, region, community_type, data_type)
+            )
+        """)
+
+    # 将旧数据回填新表（data_type 默认 buy）
+    for row in old_rows:
+        row_dict = dict(zip(col_names, row)) if col_names else {}
+        if table_name == "raw_prices":
+            cursor.execute("""
+                INSERT INTO raw_prices
+                (date, region, community, community_type, data_type,
+                 price, unit, source, fetch_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                row_dict.get("date", ""),
+                row_dict.get("region", ""),
+                row_dict.get("community", ""),
+                row_dict.get("community_type", "高层"),
+                "buy",
+                row_dict.get("price", 0),
+                row_dict.get("unit", "元/㎡"),
+                row_dict.get("source", ""),
+                row_dict.get("fetch_time", ""),
+            ))
+        elif table_name == "ohlc_data":
+            cursor.execute("""
+                INSERT INTO ohlc_data
+                (date, region, community_type, data_type,
+                 open_price, high_price, low_price, close_price,
+                 avg_price, volume, sources, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                row_dict.get("date", ""),
+                row_dict.get("region", ""),
+                row_dict.get("community_type", "高层"),
+                "buy",
+                row_dict.get("open_price"),
+                row_dict.get("high_price"),
+                row_dict.get("low_price"),
+                row_dict.get("close_price"),
+                row_dict.get("avg_price"),
+                row_dict.get("volume", 0),
+                row_dict.get("sources", ""),
+                row_dict.get("updated_at", ""),
+            ))
+
+    # 删除旧表
+    cursor.execute(f"DROP TABLE IF EXISTS _migrate_old_{table_name}")
+
+    logger.info(f"{table_name} 迁移完成: {len(old_rows)} 条旧数据已回填，"
+                f"UNIQUE 约束已更新为 {expected_unique_cols}")
 
 
 # ===== 原始价格操作 =====

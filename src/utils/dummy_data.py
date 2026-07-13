@@ -17,7 +17,8 @@ from typing import Dict, List
 from src.data.database import insert_raw_prices_batch, insert_ohlc
 from src.utils.config import (
     REGION_NAMES, COMMUNITY_TYPE_NAMES, COMMUNITY_TYPES,
-    BUY_BASE_PRICES, RENT_BASE_PRICES, DATA_TYPE_UNIT
+    BUY_BASE_PRICES, RENT_BASE_PRICES, DATA_TYPE_UNIT,
+    DATA_TYPES, DATA_TYPE_NAMES
 )
 from src.utils.logger import get_logger
 
@@ -111,7 +112,7 @@ def generate_dummy_data(days: int = 30, data_type: str = "buy") -> int:
     - 每个区域每类型每天从小区列表中随机选3-8个出价
     - 约65%的数据源当天有数据
     """
-    type_label = "租房" if data_type == "rent" else "买房"
+    type_label = DATA_TYPES.get(data_type, "买房价格")
     logger.info(f"开始生成假数据 ({days}天, {type_label}, data_type={data_type})...")
 
     total_count = 0
@@ -137,10 +138,11 @@ def generate_dummy_data(days: int = 30, data_type: str = "buy") -> int:
                     # 每个小区每天约65%概率每个源有数据
                     for source in SOURCES:
                         if random.random() < 0.65:
-                            # 源偏移（不同网站价格略有差异）
-                            source_offset = random.uniform(-300, 300)
-                            # 随机波动（±15%以内）
-                            noise = random.uniform(-0.08, 0.08)
+                            # 源偏移：不同网站价格略有差异（基准价的 ±3%）
+                            # 使用比例偏移而非固定值，使租房和买房都保持合理波动
+                            source_offset = base * random.uniform(-0.03, 0.03)
+                            # 随机波动（±5%以内）
+                            noise = random.uniform(-0.05, 0.05)
                             price = base * trend * (1 + noise) + source_offset
                             # 租房最低100元/月，买房最低3000元/㎡
                             price = max(100 if data_type == "rent" else 3000, price)
@@ -171,7 +173,7 @@ def fill_ohlc_from_dummy(data_type: str = "buy"):
     参数:
         data_type: 'buy'=买房, 'rent'=租房
     """
-    type_label = "租房" if data_type == "rent" else "买房"
+    type_label = DATA_TYPES.get(data_type, "买房价格")
     logger.info(f"开始按区域+类型聚合OHLC数据 ({type_label})...")
 
     for day_offset in range(30, 0, -1):
@@ -193,33 +195,26 @@ def ensure_data_available():
 
     conn = get_connection()
 
-    # 检查买房数据
-    cur = conn.execute("SELECT COUNT(*) as cnt FROM raw_prices WHERE data_type='buy'")
-    buy_total = cur.fetchone()[0]
-
-    # 检查租房数据
-    cur = conn.execute("SELECT COUNT(*) as cnt FROM raw_prices WHERE data_type='rent'")
-    rent_total = cur.fetchone()[0]
+    # 统计各类数据的现有数量
+    type_counts = {}
+    for dt in DATA_TYPE_NAMES:
+        cur = conn.execute(
+            "SELECT COUNT(*) as cnt FROM raw_prices WHERE data_type=?", (dt,)
+        )
+        type_counts[dt] = cur.fetchone()[0]
 
     conn.close()
 
     total_added = 0
 
-    # 填充买房假数据
-    if buy_total < 200:
-        logger.warning(f"买房数据不足（{buy_total}条），填充假数据...")
-        total_added += generate_dummy_data(30, data_type="buy")
-        fill_ohlc_from_dummy(data_type="buy")
-    else:
-        logger.info(f"买房数据已有 {buy_total} 条，无需填充")
-
-    # 填充租房假数据
-    if rent_total < 200:
-        logger.warning(f"租房数据不足（{rent_total}条），填充假数据...")
-        total_added += generate_dummy_data(30, data_type="rent")
-        fill_ohlc_from_dummy(data_type="rent")
-    else:
-        logger.info(f"租房数据已有 {rent_total} 条，无需填充")
+    # 统一填充逻辑：遍历所有数据类型，不足则补充
+    for dt in DATA_TYPE_NAMES:
+        if type_counts[dt] < 200:
+            logger.warning(f"{DATA_TYPES[dt]}数据不足（{type_counts[dt]}条），填充假数据...")
+            total_added += generate_dummy_data(30, data_type=dt)
+            fill_ohlc_from_dummy(data_type=dt)
+        else:
+            logger.info(f"{DATA_TYPES[dt]}数据已有 {type_counts[dt]} 条，无需填充")
 
     logger.info(f"数据填充完成，共新增 {total_added} 条")
     return total_added

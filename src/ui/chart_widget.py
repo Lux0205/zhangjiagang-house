@@ -34,6 +34,13 @@ def _build_echart_html(title: str, dates: List[str],
     total = len(dates)
     zoom_start = max(0, ((total - 30) / total) * 100) if total > 30 else 0
 
+    # 根据单位动态选择 Y 轴刻度格式
+    # 买房（元/㎡）价格较高，用"万"显示；租房（元/月）价格较低，显示原始数值
+    if unit == "元/月":
+        yaxis_formatter = "function(v) { return v.toLocaleString(); }"
+    else:
+        yaxis_formatter = "function(v) { return (v/10000).toFixed(1) + '万'; }"
+
     html = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
@@ -119,7 +126,7 @@ var option = {
       axisLine: { lineStyle: { color: '#555' } },
       axisLabel: {
         color: '#aaa',
-        formatter: function(v) { return (v/10000).toFixed(1) + '万'; }
+        formatter: """ + yaxis_formatter + """
       },
       splitLine: { lineStyle: { color: '#2a2a4a' } },
       scale: true

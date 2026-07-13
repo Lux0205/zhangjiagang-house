@@ -42,7 +42,7 @@ class UpdateWorker(QThread):
         self._stop_flag = True
 
     def run(self):
-        type_label = "租房" if self.data_type == "rent" else "买房"
+        type_label = DATA_TYPES.get(self.data_type, "买房价格")
         try:
             self.progress.emit("正在连接数据源...", 5)
             if self._stop_flag:
@@ -178,7 +178,7 @@ class MainWindow(QMainWindow):
         self.data_type_buttons: Dict[str, QPushButton] = {}
         for dt in DATA_TYPE_NAMES:
             label_text = DATA_TYPE_UNIT.get(dt, "")
-            btn = QPushButton(f"{'买房价格' if dt == 'buy' else '租房价格'} ({label_text})")
+            btn = QPushButton(f"{DATA_TYPES[dt]} ({label_text})")
             btn.setCheckable(True)
             btn.setFixedSize(140, 28)
             btn.clicked.connect(lambda checked, d=dt: self._on_data_type_clicked(d))
@@ -325,6 +325,10 @@ class MainWindow(QMainWindow):
             btn.setChecked(dt == data_type)
         self._load_chart_data(self.current_region, self.current_community_type)
         self._load_region_summary(self.current_region)
+        # 刷新"最后更新"时间戳，使其反映当前数据类型的更新时间
+        last_update = get_last_update_time(data_type=self.current_data_type)
+        update_text = f"最后更新: {last_update}" if last_update else "尚未更新"
+        self.update_time_label.setText(update_text)
 
     def _on_region_clicked(self, region_name: str):
         self.current_region = region_name
@@ -409,7 +413,7 @@ class MainWindow(QMainWindow):
                                   data_type=self.current_data_type)
 
             unit = DATA_TYPE_UNIT.get(self.current_data_type, "元/㎡")
-            type_label = "租房" if self.current_data_type == "rent" else "买房"
+            type_label = DATA_TYPES.get(self.current_data_type, "买房价格")
 
             if data["dates"]:
                 title = f"{region_name} - {community_type} {type_label}K线图 (近30天)"
@@ -440,9 +444,9 @@ class MainWindow(QMainWindow):
                 logger.info(f"已加载 {region_name}/{community_type} {type_label}K线图: {len(data['dates'])} 天")
             else:
                 title = f"{region_name} - {community_type} - 暂无数据"
-                self.chart_widget.update_chart([], [], [], title)
+                self.chart_widget.update_chart([], [], [], title, unit=unit)
                 self.region_info_label.setText(f"区域: {region_name} | 类型: {community_type}")
-                self.price_info_label.setText(f"均价: 暂无数据")
+                self.price_info_label.setText("均价: 暂无数据")
                 self.change_info_label.setText("涨跌: --")
                 logger.info(f"{region_name}/{community_type} 暂无{type_label}数据")
 

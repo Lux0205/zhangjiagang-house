@@ -12,7 +12,7 @@ from src.scraper.zjgzf import ZjgzfScraper
 from src.scraper.ke import KeScraper
 from src.scraper.lianjia import LianjiaScraper
 from src.scraper.tongcheng58 import Tongcheng58Scraper
-from src.utils.config import SCRAPER_SOURCES, REGIONS
+from src.utils.config import SCRAPER_SOURCES, REGIONS, DATA_TYPES
 from src.utils.logger import get_logger
 
 logger = get_logger("scraper.manager")
@@ -57,7 +57,10 @@ class ScraperManager:
 
     def run_all(self, data_type: str = "buy") -> Dict[str, List[Dict]]:
         """
-        运行所有爬虫，收集数据。
+        运行所有匹配 data_type 的爬虫，收集数据。
+
+        只有 scrape_data_type 与请求的 data_type 匹配的爬虫才会被运行。
+        这避免了将买房价格错误地标记为租房数据。
 
         参数:
             data_type: 'buy'=买房, 'rent'=租房
@@ -68,21 +71,33 @@ class ScraperManager:
         self.results = {}
         self.errors = {}
 
-        type_label = "租房" if data_type == "rent" else "买房"
-        logger.info(f"开始全量抓取 ({type_label})，共 {len(self.scrapers)} 个数据源...")
+        type_label = DATA_TYPES.get(data_type, "买房价格")
+
+        # 筛选出与请求数据类型匹配的爬虫
+        matching_scrapers = {
+            k: s for k, s in self.scrapers.items()
+            if getattr(s, "scrape_data_type", "buy") == data_type
+        }
+
+        if not matching_scrapers:
+            logger.warning(f"没有抓取{type_label}数据的爬虫（所有爬虫均为买房类型）")
+            return self.results
+
+        logger.info(f"开始全量抓取 ({type_label})，共 {len(matching_scrapers)} 个匹配数据源...")
 
         total_start = datetime.now()
 
-        for key, scraper in self.scrapers.items():
+        for key, scraper in matching_scrapers.items():
             try:
                 logger.info(f"开始抓取: {scraper.source_name}")
                 records = scraper.scrape()
 
-                # 过滤有效记录，并打上 data_type 标签
+                # 过滤有效记录；爬虫自身已标注正确的 data_type
                 valid_records = []
                 for r in records:
                     if scraper.validate_record(r):
-                        r["data_type"] = data_type
+                        # 确保记录带有正确的 data_type（爬虫可能未设置）
+                        r.setdefault("data_type", data_type)
                         valid_records.append(r)
                 self.results[key] = valid_records
 
@@ -98,12 +113,13 @@ class ScraperManager:
 
         return self.results
 
-    def run_single(self, source_key: str) -> List[Dict]:
+    def run_single(self, source_key: str, data_type: str = "buy") -> List[Dict]:
         """
         运行单个爬虫。
 
         参数:
             source_key: 数据源标识（如 'anjuke'）
+            data_type: 请求的数据类型，用于校验爬虫是否匹配
 
         返回:
             该爬虫的结果列表
@@ -113,9 +129,20 @@ class ScraperManager:
             logger.error(f"未知的数据源: {source_key}")
             return []
 
+        # 校验爬虫的数据类型是否匹配
+        scraper_type = getattr(scraper, "scrape_data_type", "buy")
+        if scraper_type != data_type:
+            type_label = DATA_TYPES.get(data_type, "买房价格")
+            logger.warning(f"{scraper.source_name} 是买房爬虫，无法抓取{type_label}数据")
+            return []
+
         try:
             records = scraper.scrape()
-            valid_records = [r for r in records if scraper.validate_record(r)]
+            valid_records = []
+            for r in records:
+                if scraper.validate_record(r):
+                    r.setdefault("data_type", data_type)
+                    valid_records.append(r)
             logger.info(f"[{source_key}] 抓取完成: {len(valid_records)} 条")
             return valid_records
         except Exception as e:

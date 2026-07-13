@@ -28,6 +28,10 @@ class BaseScraper(ABC):
     - 数据格式校验
     """
 
+    # 该爬虫抓取的数据类型：'buy'=买房(元/㎡), 'rent'=租房(元/月)
+    # 子类应覆盖此属性以声明自己抓取哪种数据
+    scrape_data_type: str = "buy"
+
     def __init__(self, source_name: str, base_url: str):
         """
         初始化爬虫基类。
@@ -199,11 +203,25 @@ class BaseScraper(ABC):
                 logger.warning(f"数据缺少必要字段 {field}: {record}")
                 return False
 
-        # 价格必须是数字且合理（张家港房价范围 3000-50000）
+        # 价格必须是数字且合理
+        # 根据爬虫类型使用不同的价格范围校验
         price = record.get("price")
-        if not isinstance(price, (int, float)) or price <= 0 or price > 50000:
+        if not isinstance(price, (int, float)) or price <= 0:
             logger.warning(f"价格数据异常: {price}")
             return False
+
+        # 根据数据类型校验价格范围
+        record_data_type = record.get("data_type", self.scrape_data_type)
+        if record_data_type == "rent":
+            # 张家港租房合理范围：100-10000 元/月
+            if price > 10000:
+                logger.warning(f"租房价格异常（超过10000元/月）: {price}")
+                return False
+        else:
+            # 张家港买房合理范围：1000-100000 元/㎡
+            if price > 100000:
+                logger.warning(f"买房价格异常（超过100000元/㎡）: {price}")
+                return False
 
         # 日期格式校验
         try:
