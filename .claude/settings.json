@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(D:/python/python.exe -m unittest discover -s src -p \"test_*.py\")",
+      "Bash(D:/python/python.exe -m coverage run --source=src/utils,src/data,src/scraper -m unittest discover -s src -p \"test_*.py\")",
+      "Bash(D:/python/python.exe -m coverage report --include=\"src/utils/*,src/data/*,src/scraper/*\")",
+      "Bash(cat .gate/gate-config.json)",
+      "Bash(cat .gate/test_pass)",
+      "Bash(cat .gate/quality_pass)",
+      "Bash(rm -f .gate/test_pass .gate/test_fail .gate/quality_pass .gate/quality_fail)",
+      "Bash(git rev-parse --show-toplevel)",
+      "Bash(git status)",
+      "Bash(git add -A)",
+      "Bash(git commit -m \"*\")",
+      "Bash(git push * origin *)",
+      "Bash(D:/python/python.exe -m py_compile \"d:/zzz/张家港房价app/src/utils/config.py\")",
+      "Bash(D:/python/python.exe -m py_compile \"d:/zzz/张家港房价app/src/scraper/dynamic_scraper.py\")",
+      "Bash(D:/python/python.exe -m py_compile \"d:/zzz/张家港房价app/src/scraper/ke.py\")",
+      "Bash(D:/python/python.exe -m py_compile \"d:/zzz/张家港房价app/src/scraper/lianjia.py\")",
+      "Bash(chmod +x .git/hooks/pre-commit)",
+      "Bash(D:/python/python.exe -m unittest test_aggregator test_dummy_data test_logger)"
+    ]
+  }
+}

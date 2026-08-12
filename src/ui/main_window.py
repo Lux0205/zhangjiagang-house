@@ -1,17 +1,19 @@
 """
 张家港房价App - 主窗口
 包含：区域切换按钮 / 小区类型切换 / K线图 / 刷新 / 各类型汇总信息 / 免责声明
+
+优化：精简导入，减少启动时内存占用
 """
 
 from datetime import datetime
-from typing import Optional, Dict, List
+from typing import Optional, Dict
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QStatusBar, QProgressBar,
-    QFrame, QGroupBox, QMessageBox, QSizePolicy, QScrollArea
+    QFrame, QMessageBox, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QWaitCondition, QMutex
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 
 from src.ui.chart_widget import ChartWidget
@@ -29,16 +31,17 @@ logger = get_logger("main_window")
 
 
 class UpdateWorker(QThread):
-    """后台工作线程"""
+    """后台工作线程（每个实例有独立的停止标志）"""
     progress = pyqtSignal(str, int)
     finished = pyqtSignal(bool, str)
-    _stop_flag = False
 
     def __init__(self, data_type="buy"):
         super().__init__()
         self.data_type = data_type
+        self._stop_flag = False  # 实例变量，每个worker独立
 
     def stop(self):
+        """请求停止后台任务"""
         self._stop_flag = True
 
     def run(self):

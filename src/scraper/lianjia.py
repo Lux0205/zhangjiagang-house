@@ -3,9 +3,8 @@
 抓取链家网张家港站区域房价数据（需要JavaScript渲染）
 """
 
-import re
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict
 from bs4 import BeautifulSoup
 
 from src.scraper.dynamic_scraper import DynamicScraper
@@ -54,20 +53,6 @@ class LianjiaScraper(DynamicScraper):
 
         logger.info(f"[链家] 共抓取到 {len(all_records)} 条数据")
         return all_records
-
-    def _get_region_url(self, region_name: str) -> str:
-        """
-        获取区域对应的链家页面URL。
-        """
-        region_codes = {
-            "一环": "ershoufang/yangshezhengzhong/",
-            "二环": "ershoufang/yangshe/",
-            "三环": "ershoufang/tangqiao/",
-            "四环": "ershoufang/jinfeng/",
-            "五环": "ershoufang/",
-        }
-        code = region_codes.get(region_name, "ershoufang/")
-        return f"https://su.lianjia.com/{code}"
 
     def parse_prices(self, html: str, region_name: str, date: str) -> List[Dict]:
         """
@@ -126,12 +111,3 @@ class LianjiaScraper(DynamicScraper):
 
         return records
 
-    @staticmethod
-    def _extract_number(text: str) -> Optional[float]:
-        numbers = re.findall(r'[\d.]+', text.replace(",", ""))
-        if numbers:
-            try:
-                return float(numbers[0])
-            except ValueError:
-                pass
-        return None

@@ -1,6 +1,8 @@
 """
 张家港房价App - 多源数据聚合算法模块
 将多个数据源的原始价格按【小区类型】分组聚合为 OHLC K线数据
+
+优化：使用 source_count 整数替代 sources 文本，节省存储
 """
 
 import statistics
@@ -9,7 +11,7 @@ from typing import List, Dict, Optional
 
 from src.utils.config import AGGREGATOR_CONFIG, REGION_NAMES, COMMUNITY_TYPE_NAMES
 from src.data.database import (
-    get_raw_prices, insert_ohlc, get_ohlc_by_region_type,
+    get_connection, get_raw_prices, insert_ohlc, get_ohlc_by_region_type,
     get_latest_ohlc
 )
 from src.utils.logger import get_logger
@@ -61,7 +63,7 @@ def aggregate_daily_prices(date: str, region: str, community_type: str,
     all_mins = [v["min"] for v in source_avg_prices.values()]
     all_maxs = [v["max"] for v in source_avg_prices.values()]
     total_volume = sum(v["count"] for v in source_avg_prices.values())
-    source_list = ",".join(source_avg_prices.keys())
+    source_count = len(source_avg_prices)
 
     close_price = _safe_median(all_avgs)
     open_price = all_avgs[0] if len(all_avgs) == 1 else _safe_median(all_avgs[:2])
@@ -79,11 +81,84 @@ def aggregate_daily_prices(date: str, region: str, community_type: str,
         "close_price": round(close_price, 2),
         "avg_price": round(avg_price, 2),
         "volume": total_volume,
-        "sources": source_list,
+        "source_count": source_count,
     }
 
     insert_ohlc(**ohlc_record, data_type=data_type)
     return ohlc_record
+
+
+def aggregate_batch(dates: list, data_type: str = "buy") -> int:
+    """
+    批量聚合多个日期的OHLC数据（复用数据库连接，比逐日单独聚合快数倍）。
+
+    参数:
+        dates: 日期字符串列表
+        data_type: 'buy'=买房, 'rent'=租房
+
+    返回:
+        成功聚合的记录数
+    """
+    conn = get_connection()
+    count = 0
+    try:
+        for date in dates:
+            for region in REGION_NAMES:
+                for ctype in COMMUNITY_TYPE_NAMES:
+                    # 直接查询，避免重复获取连接
+                    cur = conn.execute("""
+                        SELECT price, source FROM raw_prices
+                        WHERE date=? AND region=? AND community_type=? AND data_type=?
+                    """, (date, region, ctype, data_type))
+                    rows = cur.fetchall()
+                    if not rows:
+                        continue
+
+                    # 分组聚合
+                    source_groups = {}
+                    for row in rows:
+                        src = row[1]
+                        if src not in source_groups:
+                            source_groups[src] = []
+                        source_groups[src].append(row[0])
+
+                    if not source_groups:
+                        continue
+
+                    all_avgs, all_mins, all_maxs, total_vol = [], [], [], 0
+                    for prices in source_groups.values():
+                        filtered = _remove_outliers(prices)
+                        if filtered:
+                            all_avgs.append(_safe_median(filtered))
+                            all_mins.append(min(filtered))
+                            all_maxs.append(max(filtered))
+                            total_vol += len(filtered)
+
+                    if not all_avgs:
+                        continue
+
+                    close_price = _safe_median(all_avgs)
+                    open_price = all_avgs[0] if len(all_avgs) == 1 else _safe_median(all_avgs[:2])
+
+                    conn.execute("""
+                        INSERT OR REPLACE INTO ohlc_data
+                        (date, region, community_type, data_type,
+                         open_price, high_price, low_price, close_price,
+                         avg_price, volume, source_count)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        date, region, ctype, data_type,
+                        round(open_price, 2), round(max(all_maxs), 2), round(min(all_mins), 2),
+                        round(close_price, 2), round(sum(all_avgs) / len(all_avgs), 2),
+                        total_vol, len(source_groups)
+                    ))
+                    count += 1
+
+        conn.commit()
+        logger.info(f"批量聚合完成: {count} 条OHLC记录")
+    except Exception as e:
+        logger.error(f"批量聚合失败: {e}")
+    return count
 
 
 def aggregate_all_regions_types(date: str = None, data_type: str = "buy") -> Dict:
@@ -188,7 +263,7 @@ def get_chart_data(region: str, community_type: str, days: int = 30,
         "avg_prices": avg_prices,
         "latest": records[-1] if records else None,
         "change_pct": round(change_pct, 2),
-        "source_count": len(records),
+        "source_count": records[-1].get("source_count", 0) if records else 0,
     }
 
 

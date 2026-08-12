@@ -2,9 +2,12 @@
 张家港房价App - K线图组件
 使用 PyQt6 + QWebEngineView + ECharts 显示K线图
 支持按小区类型(别墅/洋房/拆迁房/老小区/高层)分别显示
+
+优化：ECharts 本地化，离线也可显示图表
 """
 
 import json
+import os
 from typing import List, Dict, Optional
 
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QProgressBar
@@ -14,6 +17,28 @@ from PyQt6.QtCore import pyqtSignal, pyqtSlot
 from src.utils.logger import get_logger
 
 logger = get_logger("chart")
+
+# ECharts 本地文件路径（离线可用）
+_ECHARTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "echarts.min.js")
+_ECHARTS_CONTENT = None  # 缓存 ECharts 文件内容
+
+
+def _get_echarts_content() -> str:
+    """
+    读取 ECharts 文件内容（带缓存）。
+    直接内嵌到 HTML 中，避免 Windows 上 file:// 协议的中文路径问题。
+    """
+    global _ECHARTS_CONTENT
+    if _ECHARTS_CONTENT is not None:
+        return _ECHARTS_CONTENT
+    try:
+        with open(_ECHARTS_PATH, "r", encoding="utf-8") as f:
+            _ECHARTS_CONTENT = f.read()
+        logger.info(f"ECharts 已加载内嵌 ({len(_ECHARTS_CONTENT)} 字符)")
+    except Exception as e:
+        logger.warning(f"本地 ECharts 读取失败({e})，回退到 CDN")
+        return ""  # 空字符串表示需要回退 CDN
+    return _ECHARTS_CONTENT
 
 
 def _build_echart_html(title: str, dates: List[str],
@@ -41,6 +66,13 @@ def _build_echart_html(title: str, dates: List[str],
     else:
         yaxis_formatter = "function(v) { return (v/10000).toFixed(1) + '万'; }"
 
+    # 获取 ECharts 内容：优先内嵌本地文件，回退 CDN
+    echarts_content = _get_echarts_content()
+    if echarts_content:
+        echarts_tag = "<script>\n" + echarts_content + "\n</script>"
+    else:
+        echarts_tag = '<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>'
+
     html = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
@@ -49,8 +81,7 @@ def _build_echart_html(title: str, dates: List[str],
   #chart { width:100vw; height:100vh; }
 </style>
 </head><body>
-<div id="chart"></div>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<div id="chart"></div>""" + echarts_tag + """
 <script>
 var chart = echarts.init(document.getElementById('chart'));
 

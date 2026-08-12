@@ -1,6 +1,7 @@
 """
 张家港房价App — 爬虫管理器
-统一调度所有数据源的爬虫，收集数据并持久化"""
+统一调度所有数据源的爬虫，收集数据并持久化。
+注意：管理器只记录汇总级日志，详细抓取日志由各爬虫自行输出。"""
 
 from datetime import datetime
 from typing import List, Dict, Optional
@@ -89,7 +90,8 @@ class ScraperManager:
 
         for key, scraper in matching_scrapers.items():
             try:
-                logger.info(f"开始抓取: {scraper.source_name}")
+                # 注意：各爬虫内部会自行输出详细日志（如"[安居客] 共抓取到 X 条"）
+                # 管理器只记录汇总信息，避免日志重复
                 records = scraper.scrape()
 
                 # 过滤有效记录；爬虫自身已标注正确的 data_type
@@ -100,8 +102,6 @@ class ScraperManager:
                         r.setdefault("data_type", data_type)
                         valid_records.append(r)
                 self.results[key] = valid_records
-
-                logger.info(f"[完成] {scraper.source_name}: {len(valid_records)}/{len(records)} 条有效")
 
             except Exception as e:
                 self.errors[key] = str(e)

@@ -27,14 +27,10 @@ class AnjukeScraper(BaseScraper):
             source_name="安居客",
             base_url="https://m.anjuke.com/su/trendency/zhangjiagang/"
         )
-        # 安居客张家港各区域对应页面
-        self.region_pages = {
-            "一环": "https://m.anjuke.com/su/trendency/zhangjiagang/",
-            "二环": "https://m.anjuke.com/su/trendency/zhangjiagang/",
-            "三环": "https://m.anjuke.com/su/trendency/zhangjiagang/",
-            "四环": "https://m.anjuke.com/su/trendency/zhangjiagang/",
-            "五环": "https://m.anjuke.com/su/trendency/zhangjiagang/",
-        }
+        # 安居客张家港页面目前不区分区域（所有区域共用同一页面）
+        # 抓取时通过关键词匹配来区分不同区域的数据
+        # TODO: 如果安居客后续提供区域子页面URL，可在此配置
+        self._region_url = "https://m.anjuke.com/su/trendency/zhangjiagang/"
 
     def scrape(self) -> List[Dict]:
         """
@@ -62,6 +58,7 @@ class AnjukeScraper(BaseScraper):
     def _scrape_region(self, region_name: str, today: str) -> List[Dict]:
         """
         抓取单个区域的房价数据。
+        安居客页面不区分区域，通过关键词匹配筛选。
 
         参数:
             region_name: 区域名称
@@ -70,7 +67,7 @@ class AnjukeScraper(BaseScraper):
         返回:
             该区域的价格数据列表
         """
-        html = self.fetch_page(self.base_url)
+        html = self.fetch_page(self._region_url)
         if not html:
             return []
 

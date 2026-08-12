@@ -3,10 +3,8 @@
 抓取贝壳找房张家港站区域房价数据（需要JavaScript渲染）
 """
 
-import re
-import time
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict
 from bs4 import BeautifulSoup
 
 from src.scraper.dynamic_scraper import DynamicScraper
@@ -30,14 +28,6 @@ class KeScraper(DynamicScraper):
             source_name="贝壳找房",
             base_url="https://su.ke.com/"
         )
-        # 张家港各区域在贝壳的页面对应（区域名称映射）
-        self.region_mapping = {
-            "一环": "yihuan",
-            "二环": "erhuan",
-            "三环": "sanyihuan",
-            "四环": "sihuan",
-            "五环": "zhangjiagang",
-        }
 
     def scrape(self) -> List[Dict]:
         """
@@ -65,27 +55,6 @@ class KeScraper(DynamicScraper):
 
         logger.info(f"[贝壳] 共抓取到 {len(all_records)} 条数据")
         return all_records
-
-    def _get_region_url(self, region_name: str) -> str:
-        """
-        获取区域对应的贝壳页面URL。
-
-        参数:
-            region_name: 区域名称
-
-        返回:
-            该区域的贝壳页面URL
-        """
-        # 张家港贝壳各区域子页面
-        region_codes = {
-            "一环": "ershoufang/yangshezhengzhong/",
-            "二环": "ershoufang/yangshe/",
-            "三环": "ershoufang/tangqiao/",
-            "四环": "ershoufang/jinfeng/",
-            "五环": "ershoufang/",
-        }
-        code = region_codes.get(region_name, "ershoufang/")
-        return f"https://su.ke.com/{code}"
 
     def parse_prices(self, html: str, region_name: str, date: str) -> List[Dict]:
         """
@@ -159,21 +128,3 @@ class KeScraper(DynamicScraper):
 
         return records
 
-    @staticmethod
-    def _extract_number(text: str) -> Optional[float]:
-        """
-        从文本中提取数字。
-
-        参数:
-            text: 包含数字的文本
-
-        返回:
-            提取的数字，失败返回 None
-        """
-        numbers = re.findall(r'[\d.]+', text.replace(",", ""))
-        if numbers:
-            try:
-                return float(numbers[0])
-            except ValueError:
-                pass
-        return None

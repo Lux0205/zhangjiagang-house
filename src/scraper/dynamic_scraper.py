@@ -3,6 +3,7 @@
 用于需要JavaScript渲染的页面（贝壳、链家等）
 """
 
+import re
 import time
 from abc import abstractmethod
 from typing import List, Dict, Optional
@@ -103,6 +104,50 @@ class DynamicScraper(BaseScraper):
         except Exception as e:
             logger.error(f"[{self.source_name}] 动态页面获取失败: {e}")
             return None
+
+    # ===== 区域 URL 映射（供所有动态爬虫子类使用）=====
+
+    _REGION_CODES = {
+        "一环": "ershoufang/yangshezhengzhong/",
+        "二环": "ershoufang/yangshe/",
+        "三环": "ershoufang/tangqiao/",
+        "四环": "ershoufang/jinfeng/",
+        "五环": "ershoufang/",
+    }
+
+    def _get_region_url(self, region_name: str) -> str:
+        """
+        获取区域对应的页面URL。
+
+        参数:
+            region_name: 区域名称（如 "一环"）
+
+        返回:
+            该区域的页面URL
+        """
+        code = self._REGION_CODES.get(region_name, "ershoufang/")
+        return f"{self.base_url}{code}"
+
+    @staticmethod
+    def _extract_number(text: str) -> Optional[float]:
+        """
+        从文本中提取数字。
+
+        参数:
+            text: 包含数字的文本
+
+        返回:
+            提取的数字，失败返回 None
+        """
+        numbers = re.findall(r'[\d.]+', text.replace(",", ""))
+        if numbers:
+            try:
+                return float(numbers[0])
+            except ValueError:
+                pass
+        return None
+
+    # ===== 子类必须实现的抽象方法 =====
 
     @abstractmethod
     def parse_prices(self, html: str, region_name: str, date: str) -> List[Dict]:

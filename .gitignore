@@ -33,3 +33,8 @@ Thumbs.db
 venv/
 env/
 .venv/
+
+# ===== 质量门禁标记文件 =====
+.gate/*.pass
+.gate/*.fail
+!/gate-config.json

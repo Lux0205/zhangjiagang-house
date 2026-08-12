@@ -3,19 +3,17 @@
 运行此文件启动桌面软件
 
 用法: python main.py
+
+优化：精简启动流程，减少初始化时间
 """
 
 import sys
 import os
 
 # 确保项目根目录始终在 Python 路径最前面
-# 无论从哪里运行（python src/main.py / 双击 / IDE），都能找到模块
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)  # 项目根目录
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
-# Python 运行 python src/main.py 时会自动把 src/ 加入 sys.path，
-# 但我们使用 "from src.xxx" 导入需要项目根目录。
-# 所以清理掉 src/ 路径，只保留项目根目录。
 for p in list(sys.path):
     if p and os.path.isdir(p) and os.path.samefile(p, SCRIPT_DIR):
         sys.path.remove(p)
@@ -32,8 +30,7 @@ def main():
     2. 启动 PyQt6 应用
     3. 显示主窗口
     """
-    # ============ PyQt6 + QtWebEngine 初始化 ============
-    # 必须在创建 QApplication 之前设置 OpenGL 共享上下文
+    # PyQt6 + QtWebEngine 初始化
     from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import QApplication
 
@@ -45,15 +42,13 @@ def main():
     app.setApplicationName("张家港房价K线图")
     app.setApplicationVersion("1.0.0")
 
-    # 初始化日志
+    # 延迟导入：只在需要时才加载模块，减少启动时间和内存
     from src.utils.logger import get_logger
     logger = get_logger("app")
-    logger.info("=" * 60)
     logger.info("张家港房价K线图软件 启动")
-    logger.info("=" * 60)
 
     # 初始化数据库（会自动创建表）
-    from src.data.database import init_database
+    from src.data.database import init_database, close_connection
     init_database()
     logger.info("数据库已就绪")
 
@@ -73,7 +68,11 @@ def main():
     logger.info("主窗口已显示")
 
     # 进入Qt事件循环
-    sys.exit(app.exec())
+    exit_code = app.exec()
+
+    # 退出时清理数据库连接
+    close_connection()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

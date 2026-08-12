@@ -2,10 +2,16 @@
 张家港房价App - SQLite 数据库操作模块
 管理房价数据的存储和查询
 支持按小区类型（别墅/洋房/拆迁房/老小区/高层）分类
+
+优化说明：
+- raw_prices 不含 unit/fetch_time（unit 由 data_type 推导，fetch_time 无用）
+- ohlc_data 不含 sources 文本/updated_at（改为 source_count 整数，节省存储）
+- 使用线程本地连接复用，减少连接开销
 """
 
 import sqlite3
 import os
+import threading
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 
@@ -14,23 +20,66 @@ from src.utils.logger import get_logger
 
 logger = get_logger("database")
 
+# 线程本地存储：每个线程复用同一个数据库连接
+_thread_local = threading.local()
+
+
+def _is_connection_alive(conn) -> bool:
+    """检查数据库连接是否仍然可用"""
+    try:
+        conn.execute("SELECT 1")
+        return True
+    except Exception:
+        return False
+
 
 def get_connection() -> sqlite3.Connection:
-    """获取数据库连接，自动创建目录和表"""
+    """
+    获取数据库连接（线程级复用）。
+    同一线程内多次调用返回同一连接，减少连接开销。
+    自动创建目录和表。
+    检测 DATABASE_PATH 变化或连接已关闭时，自动重建连接。
+    """
+    conn = getattr(_thread_local, "connection", None)
+    cached_path = getattr(_thread_local, "db_path", None)
+    if conn is not None and cached_path == DATABASE_PATH and _is_connection_alive(conn):
+        return conn
+    # 路径变了或连接已失效，关闭旧连接
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
     db_dir = os.path.dirname(DATABASE_PATH)
     os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")  # 提升写入速度
+    _thread_local.connection = conn
+    _thread_local.db_path = DATABASE_PATH
     return conn
+
+
+def close_connection():
+    """关闭当前线程的数据库连接"""
+    conn = getattr(_thread_local, "connection", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        _thread_local.connection = None
+        _thread_local.db_path = None
 
 
 def init_database():
     """
     初始化数据库表结构。
     两张表：
-    1. raw_prices  — 原始抓取的每套房屋价格（含 community_type、data_type 字段）
-    2. ohlc_data   — 聚合后的OHLC K线数据（按 区域+类型+日期+data_type 聚合）
+    1. raw_prices  — 原始抓取的每套房屋价格（精简字段，不含 unit/fetch_time）
+    2. ohlc_data   — 聚合后的OHLC K线数据（source_count 替代 sources 文本）
 
     data_type: 'buy'=买房(元/㎡), 'rent'=租房(元/月)
 
@@ -40,7 +89,7 @@ def init_database():
     conn = get_connection()
     c = conn.cursor()
 
-    # 第一步：创建新表（包含 community_type、data_type 列）
+    # 第一步：创建新表（精简字段版本）
     c.execute("""
         CREATE TABLE IF NOT EXISTS raw_prices (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,9 +99,7 @@ def init_database():
             community_type  TEXT    DEFAULT '高层',
             data_type       TEXT    DEFAULT 'buy',
             price           REAL    NOT NULL,
-            unit            TEXT    DEFAULT '元/㎡',
             source          TEXT    NOT NULL,
-            fetch_time      TEXT    NOT NULL,
             UNIQUE(date, region, community, source, data_type)
         )
     """)
@@ -70,29 +117,65 @@ def init_database():
             close_price     REAL,
             avg_price       REAL,
             volume          INTEGER DEFAULT 0,
-            sources         TEXT,
-            updated_at      TEXT    NOT NULL,
+            source_count    INTEGER DEFAULT 0,
             UNIQUE(date, region, community_type, data_type)
         )
     """)
 
     # 第二步：检查并升级旧表
-    # SQLite 的 ALTER TABLE ADD COLUMN 无法修改 UNIQUE 约束，
-    # 所以需要检测旧约束并重建表以刷新约束定义。
     _migrate_table(c, "raw_prices",
                    "(date, region, community, source, data_type)",
-                   ["community_type", "data_type"])
+                   ["community_type", "data_type", "unit", "fetch_time"])
     _migrate_table(c, "ohlc_data",
                    "(date, region, community_type, data_type)",
-                   ["community_type", "data_type"])
+                   ["community_type", "data_type", "source_count"])
 
     # 索引
     c.execute("CREATE INDEX IF NOT EXISTS idx_rp_drtd ON raw_prices(date, region, community_type, data_type)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_od_drtd ON ohlc_data(date, region, community_type, data_type)")
 
     conn.commit()
-    logger.info("数据库初始化完成")
-    conn.close()
+    logger.info("数据库初始化完成（精简字段版）")
+
+
+def _create_table_sql(table_name: str) -> str:
+    """
+    返回指定表的建表SQL（供初始化和迁移共用，确保结构一致）。
+    精简字段版：raw_prices 不含 unit/fetch_time，ohlc_data 用 source_count 替代 sources。
+    """
+    if table_name == "raw_prices":
+        return """
+            CREATE TABLE raw_prices (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                date            TEXT    NOT NULL,
+                region          TEXT    NOT NULL,
+                community       TEXT,
+                community_type  TEXT    DEFAULT '高层',
+                data_type       TEXT    DEFAULT 'buy',
+                price           REAL    NOT NULL,
+                source          TEXT    NOT NULL,
+                UNIQUE(date, region, community, source, data_type)
+            )
+        """
+    elif table_name == "ohlc_data":
+        return """
+            CREATE TABLE ohlc_data (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                date            TEXT    NOT NULL,
+                region          TEXT    NOT NULL,
+                community_type  TEXT    DEFAULT '高层',
+                data_type       TEXT    DEFAULT 'buy',
+                open_price      REAL,
+                high_price      REAL,
+                low_price       REAL,
+                close_price     REAL,
+                avg_price       REAL,
+                volume          INTEGER DEFAULT 0,
+                source_count    INTEGER DEFAULT 0,
+                UNIQUE(date, region, community_type, data_type)
+            )
+        """
+    return ""
 
 
 def _migrate_table(cursor, table_name, expected_unique_cols, expected_columns):
@@ -109,13 +192,16 @@ def _migrate_table(cursor, table_name, expected_unique_cols, expected_columns):
     cursor.execute(f"PRAGMA table_info({table_name})")
     existing_cols = [row[1] for row in cursor.fetchall()]
 
-    # 检查是否缺少新列（说明是旧版数据库）
+    # 检查是否缺少新列或需要移除旧列
     missing_cols = [col for col in expected_columns if col not in existing_cols]
-    if not missing_cols:
-        logger.info(f"{table_name} 结构已是最新，无需迁移")
-        return
+    # 旧版数据库可能有 unit/fetch_time/sources/updated_at 等已移除的列
+    old_only_cols = {"unit", "fetch_time", "sources", "updated_at"}
+    has_old_cols = any(col in old_only_cols for col in existing_cols)
 
-    logger.info(f"{table_name} 旧版数据库缺少列 {missing_cols}，执行完整迁移...")
+    if not missing_cols and not has_old_cols:
+        return  # 结构已是最新
+
+    logger.info(f"{table_name} 数据库结构需要升级（缺少{missing_cols}，有旧列{has_old_cols}），执行迁移...")
 
     # 读取旧数据
     cursor.execute(f"SELECT * FROM {table_name}")
@@ -125,98 +211,62 @@ def _migrate_table(cursor, table_name, expected_unique_cols, expected_columns):
     # 重命名旧表（保留数据）
     cursor.execute(f"ALTER TABLE {table_name} RENAME TO _migrate_old_{table_name}")
 
-    # 创建新表（使用正确的含 data_type 的 UNIQUE 约束）
-    if table_name == "raw_prices":
-        cursor.execute("""
-            CREATE TABLE raw_prices (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                date            TEXT    NOT NULL,
-                region          TEXT    NOT NULL,
-                community       TEXT,
-                community_type  TEXT    DEFAULT '高层',
-                data_type       TEXT    DEFAULT 'buy',
-                price           REAL    NOT NULL,
-                unit            TEXT    DEFAULT '元/㎡',
-                source          TEXT    NOT NULL,
-                fetch_time      TEXT    NOT NULL,
-                UNIQUE(date, region, community, source, data_type)
-            )
-        """)
-    elif table_name == "ohlc_data":
-        cursor.execute("""
-            CREATE TABLE ohlc_data (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                date            TEXT    NOT NULL,
-                region          TEXT    NOT NULL,
-                community_type  TEXT    DEFAULT '高层',
-                data_type       TEXT    DEFAULT 'buy',
-                open_price      REAL,
-                high_price      REAL,
-                low_price       REAL,
-                close_price     REAL,
-                avg_price       REAL,
-                volume          INTEGER DEFAULT 0,
-                sources         TEXT,
-                updated_at      TEXT    NOT NULL,
-                UNIQUE(date, region, community_type, data_type)
-            )
-        """)
+    # 创建新表（使用统一的建表SQL，确保与初始化时一致）
+    cursor.execute(_create_table_sql(table_name))
 
-    # 将旧数据回填新表（data_type 默认 buy）
+    # 将旧数据回填新表
     for row in old_rows:
         row_dict = dict(zip(col_names, row)) if col_names else {}
         if table_name == "raw_prices":
             cursor.execute("""
                 INSERT INTO raw_prices
-                (date, region, community, community_type, data_type,
-                 price, unit, source, fetch_time)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (date, region, community, community_type, data_type, price, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 row_dict.get("date", ""),
                 row_dict.get("region", ""),
                 row_dict.get("community", ""),
                 row_dict.get("community_type", "高层"),
-                "buy",
+                row_dict.get("data_type", "buy"),
                 row_dict.get("price", 0),
-                row_dict.get("unit", "元/㎡"),
                 row_dict.get("source", ""),
-                row_dict.get("fetch_time", ""),
             ))
         elif table_name == "ohlc_data":
+            # 旧版 sources 是逗号分隔的文本，转换为 source_count 整数
+            sources_text = row_dict.get("sources", "")
+            source_count = len([s for s in sources_text.split(",") if s.strip()]) if sources_text else 0
             cursor.execute("""
                 INSERT INTO ohlc_data
                 (date, region, community_type, data_type,
                  open_price, high_price, low_price, close_price,
-                 avg_price, volume, sources, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 avg_price, volume, source_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 row_dict.get("date", ""),
                 row_dict.get("region", ""),
                 row_dict.get("community_type", "高层"),
-                "buy",
+                row_dict.get("data_type", "buy"),
                 row_dict.get("open_price"),
                 row_dict.get("high_price"),
                 row_dict.get("low_price"),
                 row_dict.get("close_price"),
                 row_dict.get("avg_price"),
                 row_dict.get("volume", 0),
-                row_dict.get("sources", ""),
-                row_dict.get("updated_at", ""),
+                source_count,
             ))
 
     # 删除旧表
     cursor.execute(f"DROP TABLE IF EXISTS _migrate_old_{table_name}")
 
-    logger.info(f"{table_name} 迁移完成: {len(old_rows)} 条旧数据已回填，"
-                f"UNIQUE 约束已更新为 {expected_unique_cols}")
+    logger.info(f"{table_name} 迁移完成: {len(old_rows)} 条旧数据已回填")
 
 
 # ===== 原始价格操作 =====
 
 def insert_raw_price(date, region, community, price, source,
-                     unit="元/㎡", community_type="高层", data_type="buy"):
+                     community_type="高层", data_type="buy"):
     """
-    插入一条原始价格。
+    插入一条原始价格（精简字段版，不含 unit/fetch_time）。
 
     参数:
         data_type: 'buy'=买房, 'rent'=租房
@@ -225,42 +275,38 @@ def insert_raw_price(date, region, community, price, source,
     try:
         conn.execute("""
             INSERT OR IGNORE INTO raw_prices
-            (date, region, community, community_type, data_type, price, unit, source, fetch_time)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (date, region, community, community_type, data_type, price, unit, source,
-              datetime.now().isoformat()))
+            (date, region, community, community_type, data_type, price, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (date, region, community, community_type, data_type, price, source))
         conn.commit()
         return True
     except sqlite3.Error as e:
         logger.error(f"插入失败: {e}")
         return False
-    finally:
-        conn.close()
 
 
 def insert_raw_prices_batch(records):
     """
-    批量插入原始价格数据。
+    批量插入原始价格数据（精简字段版）。
 
     参数:
         records: 字典列表，每个字典需包含 date, region, price, source，
-                 可选 community, community_type, data_type, unit
+                 可选 community, community_type, data_type
     """
     conn = get_connection()
     count = 0
     try:
-        now = datetime.now().isoformat()
         for r in records:
             try:
                 conn.execute("""
                     INSERT OR IGNORE INTO raw_prices
-                    (date, region, community, community_type, data_type, price, unit, source, fetch_time)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (date, region, community, community_type, data_type, price, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, (
                     r["date"], r["region"], r.get("community", ""),
                     r.get("community_type", "高层"),
                     r.get("data_type", "buy"),
-                    r["price"], r.get("unit", "元/㎡"), r["source"], now
+                    r["price"], r["source"]
                 ))
                 count += 1
             except (sqlite3.Error, KeyError) as e:
@@ -269,8 +315,6 @@ def insert_raw_prices_batch(records):
         logger.info(f"批量插入 {count} 条原始数据")
     except sqlite3.Error as e:
         logger.error(f"批量插入失败: {e}")
-    finally:
-        conn.close()
     return count
 
 
@@ -321,11 +365,12 @@ def get_raw_prices_stats(date, region):
 
 def insert_ohlc(date, region, community_type,
                 open_price, high_price, low_price, close_price,
-                avg_price, volume, sources="", data_type="buy"):
+                avg_price, volume, source_count=0, data_type="buy"):
     """
-    插入/更新OHLC数据。
+    插入/更新OHLC数据（精简字段版，source_count 替代 sources 文本）。
 
     参数:
+        source_count: 数据源数量（整数，替代原来的逗号分隔文本）
         data_type: 'buy'=买房, 'rent'=租房
     """
     conn = get_connection()
@@ -333,17 +378,15 @@ def insert_ohlc(date, region, community_type,
         conn.execute("""
             INSERT OR REPLACE INTO ohlc_data
             (date, region, community_type, data_type, open_price, high_price, low_price,
-             close_price, avg_price, volume, sources, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             close_price, avg_price, volume, source_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (date, region, community_type, data_type, open_price, high_price, low_price,
-              close_price, avg_price, volume, sources, datetime.now().isoformat()))
+              close_price, avg_price, volume, source_count))
         conn.commit()
         return True
     except sqlite3.Error as e:
         logger.error(f"插入OHLC失败: {e}")
         return False
-    finally:
-        conn.close()
 
 
 def get_ohlc_by_region_type(region, community_type, days=365, data_type="buy"):
@@ -357,7 +400,7 @@ def get_ohlc_by_region_type(region, community_type, days=365, data_type="buy"):
     try:
         cur = conn.execute("""
             SELECT date, open_price, high_price, low_price, close_price,
-                   avg_price, volume, sources
+                   avg_price, volume, source_count
             FROM ohlc_data
             WHERE region=? AND community_type=? AND data_type=?
               AND date >= date('now', ?)
@@ -379,7 +422,7 @@ def get_latest_ohlc(region, community_type, data_type="buy"):
     try:
         cur = conn.execute("""
             SELECT date, open_price, high_price, low_price, close_price,
-                   avg_price, volume, sources
+                   avg_price, volume, source_count
             FROM ohlc_data
             WHERE region=? AND community_type=? AND data_type=?
             ORDER BY date DESC LIMIT 1

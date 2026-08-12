@@ -1,0 +1,20 @@
+{
+  "version": "1.0",
+  "test": {
+    "coverage_min_percent": 50,
+    "coverage_include": [
+      "src/utils/*",
+      "src/data/*",
+      "src/scraper/*"
+    ],
+    "fail_on_any_test_failure": true
+  },
+  "quality": {
+    "allow_high_risks": 0,
+    "allow_medium_risks_max": 3,
+    "overall_score_min": 60,
+    "comment_coverage_min_percent": 25
+  },
+  "strict": false,
+  "timeout_seconds": 180
+}
